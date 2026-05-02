@@ -35,6 +35,13 @@ export default function HomeScreen() {
 
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [blockedSet, setBlockedSet] = useState<Set<string>>(new Set());
+  // Hidden apps are stronger than blocked apps: blocked apps still appear
+  // in the launcher list (dimmed) and surface a warning when tapped, but
+  // hidden apps are filtered out entirely before render — they don't exist
+  // as far as the UI is concerned. A future step will add UI / persistence
+  // for managing this set; for now it lives only in component state.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [hiddenApps, setHiddenApps] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState<boolean>(true);
   const [warning, setWarning] = useState<string | null>(null);
 
@@ -82,14 +89,22 @@ export default function HomeScreen() {
     };
   }, []);
 
-  // ── Sorted list (alphabetical, case-insensitive) ───────────────────────
-  // Native side already sorts by lowercased name, but we re-sort defensively
-  // so this stays correct even if a future change drops the native ordering.
+  // ── Visible list (filter hidden, then sort alphabetically) ─────────────
+  // Order matters: filter first so we don't waste cycles sorting entries
+  // we're about to drop. Native side already sorts by lowercased name, but
+  // we re-sort defensively so this stays correct even if a future change
+  // drops the native ordering.
+  //
+  // Hidden apps are removed from the array entirely — there is intentionally
+  // no visual marker, no row, no "ghost" placeholder. From the launcher's
+  // point of view, a hidden app simply does not exist.
   const sortedApps = useMemo(() => {
-    return [...apps].sort((a, b) =>
-      a.name.toLowerCase().localeCompare(b.name.toLowerCase())
-    );
-  }, [apps]);
+    return apps
+      .filter((app) => !hiddenApps.has(app.packageName))
+      .sort((a, b) =>
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+      );
+  }, [apps, hiddenApps]);
 
   // ── Tap handler ────────────────────────────────────────────────────────
   const handleTap = useCallback(
