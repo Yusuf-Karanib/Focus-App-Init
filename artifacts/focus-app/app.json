@@ -17,7 +17,9 @@
     "ios": {
       "supportsTablet": false
     },
-    "android": {},
+    "android": {
+      "package": "com.anonymous.focusapp"
+    },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
