@@ -21,6 +21,7 @@ export interface FocusModuleType {
   isServiceEnabled(): boolean;
   openAccessibilitySettings(): void;
   getInstalledApps(): InstalledApp[];
+  launchApp(packageName: string): boolean;
 }
 
 const noop: FocusModuleType = {
@@ -35,6 +36,7 @@ const noop: FocusModuleType = {
     }
   },
   getInstalledApps: () => [],
+  launchApp: () => false,
 };
 
 let nativeModule: FocusModuleType;
@@ -103,4 +105,22 @@ export function openAccessibilitySettings(): void {
  */
 export function getInstalledApps(): InstalledApp[] {
   return nativeModule.getInstalledApps();
+}
+
+/**
+ * Launch the given app by package name from our launcher.
+ *
+ * Resolves the package's main launcher activity via
+ * `PackageManager.getLaunchIntentForPackage` and starts it. Returns `true`
+ * if the app was launched, `false` for any handled failure (package not
+ * installed, no launcher activity, restricted by work-profile policy, etc).
+ *
+ * Never throws — UIs can safely call this on user tap without a try/catch.
+ *
+ * On web and inside Expo Go this is a safe no-op that returns `false`.
+ *
+ * @param packageName e.g. "com.android.chrome"
+ */
+export function launchApp(packageName: string): boolean {
+  return nativeModule.launchApp(packageName);
 }
