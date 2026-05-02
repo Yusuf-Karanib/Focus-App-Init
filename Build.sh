@@ -37,6 +37,10 @@ sdkmanager \
 echo "Android SDK ready at: $ANDROID_SDK_ROOT"
 
 # ── Gradle build ─────────────────────────────────────────────────────────────
+ANDROID_PROJECT_DIR="${ANDROID_PROJECT_DIR:-artifacts/focus-app/android}"
+echo "Building from: $ANDROID_PROJECT_DIR"
+cd "$ANDROID_PROJECT_DIR"
+
 GRADLE_OPTS="-Xmx1024m -XX:-UsePerfData" \
   ./gradlew assembleDebug \
     --max-workers=1 \
