@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Animated,
+  AppState,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -37,6 +38,15 @@ export default function HomeScreen() {
   const [packageInput, setPackageInput] = useState("");
   const [blockedPackages, setBlockedPackages] = useState<string[]>(DEFAULT_BLOCKED);
   const [error, setError] = useState<string | null>(null);
+  const [serviceEnabled, setServiceEnabled] = useState<boolean>(false);
+
+  const checkServiceStatus = useCallback(() => {
+    try {
+      setServiceEnabled(FocusModule.isServiceEnabled());
+    } catch {
+      setServiceEnabled(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isFocusModuleAvailable) return;
@@ -47,6 +57,27 @@ export default function HomeScreen() {
       /* keep defaults */
     }
   }, []);
+
+  // Re-check accessibility permission on mount and whenever the app comes
+  // back to the foreground (i.e. after the user returns from system Settings).
+  useEffect(() => {
+    checkServiceStatus();
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") checkServiceStatus();
+    });
+    return () => sub.remove();
+  }, [checkServiceStatus]);
+
+  function handleGrantPermission() {
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+    try {
+      FocusModule.openAccessibilitySettings();
+    } catch {
+      /* no-op fallback handles web/Expo Go */
+    }
+  }
 
   useEffect(() => {
     try {
@@ -118,6 +149,41 @@ export default function HomeScreen() {
       >
         {/* Minimal header */}
         <Text style={[styles.appName, { color: c.text }]}>FocusApp</Text>
+
+        {/* ── Permission banner (only when service is not granted) ───────── */}
+        {!serviceEnabled && (
+          <Pressable
+            onPress={handleGrantPermission}
+            style={({ pressed }) => [
+              styles.permissionBanner,
+              {
+                backgroundColor: c.warningBg,
+                borderColor: c.warningBorder,
+                opacity: pressed ? 0.9 : 1,
+              },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Grant Accessibility Permission"
+          >
+            <View
+              style={[
+                styles.permissionIconWrap,
+                { backgroundColor: c.warningIconBg },
+              ]}
+            >
+              <Feather name="alert-triangle" size={20} color={c.warningIcon} />
+            </View>
+            <View style={styles.permissionText}>
+              <Text style={[styles.permissionTitle, { color: c.warningText }]}>
+                Grant Accessibility Permission
+              </Text>
+              <Text style={[styles.permissionSub, { color: c.warningSub }]}>
+                Required for FocusApp to block apps. Tap to open Settings.
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={c.warningSub} />
+          </Pressable>
+        )}
 
         {/* ── FOCAL POINT 1: Focus Mode toggle ───────────────────────────── */}
         <Animated.View style={{ transform: [{ scale }] }}>
@@ -316,6 +382,12 @@ const light = {
   iconBg: "#f1f5f9",
   switchTrackOff: "#cbd5e1",
   danger: "#dc2626",
+  warningBg: "#fffbeb",
+  warningBorder: "#fcd34d",
+  warningIconBg: "#fef3c7",
+  warningIcon: "#b45309",
+  warningText: "#78350f",
+  warningSub: "#92400e",
 };
 
 const dark = {
@@ -328,6 +400,12 @@ const dark = {
   iconBg: "#334155",
   switchTrackOff: "#475569",
   danger: "#f87171",
+  warningBg: "#422006",
+  warningBorder: "#a16207",
+  warningIconBg: "#713f12",
+  warningIcon: "#fbbf24",
+  warningText: "#fde68a",
+  warningSub: "#fcd34d",
 };
 
 /* ── Styles ─────────────────────────────────────────────────────────────── */
@@ -343,6 +421,35 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: -0.4,
     marginBottom: 4,
+  },
+
+  /* Permission banner */
+  permissionBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    gap: 12,
+  },
+  permissionIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  permissionText: {
+    flex: 1,
+    gap: 2,
+  },
+  permissionTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  permissionSub: {
+    fontSize: 12,
+    lineHeight: 16,
   },
 
   /* Hero toggle */
