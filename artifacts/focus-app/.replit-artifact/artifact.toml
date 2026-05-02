@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "FocusApp"
+version = "1.0.0"
+id = "artifacts/focus-app"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 23216
+
+[services.development]
+run = "pnpm --filter @workspace/focus-app run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/focus-app", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/focus-app", "run", "serve" ]
+
+[services.env]
+PORT = "23216"
+BASE_PATH = "/"
