@@ -1,11 +1,26 @@
 import { requireNativeModule } from "expo-modules-core";
 import { Platform } from "react-native";
 
+/**
+ * One row returned by `getInstalledApps()`.
+ *
+ * - `name`: the app's user-visible label (what shows under its icon in the
+ *           system launcher), e.g. "Instagram".
+ * - `packageName`: the Android package id used everywhere else in this
+ *           module, e.g. "com.instagram.android". Pass this string back
+ *           to `setBlockedApps` to block the app.
+ */
+export interface InstalledApp {
+  name: string;
+  packageName: string;
+}
+
 export interface FocusModuleType {
   setBlockedApps(packages: string[]): number;
   getBlockedApps(): string[];
   isServiceEnabled(): boolean;
   openAccessibilitySettings(): void;
+  getInstalledApps(): InstalledApp[];
 }
 
 const noop: FocusModuleType = {
@@ -19,6 +34,7 @@ const noop: FocusModuleType = {
       );
     }
   },
+  getInstalledApps: () => [],
 };
 
 let nativeModule: FocusModuleType;
@@ -69,4 +85,22 @@ export function isServiceEnabled(): boolean {
 
 export function openAccessibilitySettings(): void {
   nativeModule.openAccessibilitySettings();
+}
+
+/**
+ * Return every launchable app installed on the device — the apps the user
+ * can normally see in their app drawer. Hidden system services and packages
+ * without a launch intent are excluded, as is FocusApp itself.
+ *
+ * Each entry has a human-readable `name` (e.g. "Instagram") and a
+ * `packageName` (e.g. "com.instagram.android"). Pass the `packageName`
+ * value back into `setBlockedApps` to block that app.
+ *
+ * On web and inside Expo Go this is a safe no-op that returns an empty array.
+ *
+ * Note: requires the `QUERY_ALL_PACKAGES` permission, which is declared by
+ * this module's Expo config plugin.
+ */
+export function getInstalledApps(): InstalledApp[] {
+  return nativeModule.getInstalledApps();
 }
