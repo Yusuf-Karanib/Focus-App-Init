@@ -56,10 +56,19 @@ ANDROID_PROJECT_DIR="${ANDROID_PROJECT_DIR:-artifacts/focus-app/android}"
 echo "Building from: $ANDROID_PROJECT_DIR"
 cd "$ANDROID_PROJECT_DIR"
 
+# JVM tuning — keep memory low and skip the perf-data file (which gradle
+# otherwise scribbles into /tmp). These are JVM flags, NOT gradle CLI flags,
+# so passing them directly to `./gradlew` (e.g. `./gradlew ... -Xmx768m`)
+# would make gradle reject them as unknown tasks. They must reach the JVM
+# via env vars / -D properties:
+#   GRADLE_OPTS         → applied to the gradle launcher JVM
+#   org.gradle.jvmargs  → applied to the gradle worker JVMs that do the
+#                         actual compilation work
 GRADLE_OPTS="-Xmx768m -XX:-UsePerfData" \
   ./gradlew assembleRelease \
-    --no-parallel \
-    --no-daemon
+    --no-daemon \
+    --max-workers=1 \
+    -Dorg.gradle.jvmargs="-Xmx768m -XX:-UsePerfData"
 
 # ── APK extraction ───────────────────────────────────────────────────────────
 # After cd into ANDROID_PROJECT_DIR above, the APK lands in:
@@ -72,13 +81,12 @@ GRADLE_OPTS="-Xmx768m -XX:-UsePerfData" \
 RELEASE_APK_DIR="app/build/outputs/apk/release"
 SIGNED_APK="$RELEASE_APK_DIR/app-release.apk"
 UNSIGNED_APK="$RELEASE_APK_DIR/app-release-unsigned.apk"
-DEST="$SCRIPT_DIR/FocusApp-Release.apk"
 
-# SCRIPT_DIR isn't set yet — derive it now from the original invocation.
-# We were cd'd into the android project, so go back via the absolute path
-# resolved at the start of the script.
-WORKSPACE_ROOT="$(cd "$OLDPWD" 2>/dev/null && pwd)" || WORKSPACE_ROOT="$(pwd)/../.."
-DEST="$WORKSPACE_ROOT/FocusApp-Release.apk"
+# Resolve the workspace root (the parent of artifacts/focus-app/android).
+# We were `cd`d into the android project earlier, so $OLDPWD points back
+# at wherever the script was invoked from — that's the project root.
+WORKSPACE_ROOT="$(cd "${OLDPWD:-..}" 2>/dev/null && pwd)" || WORKSPACE_ROOT="$(pwd)/../.."
+DEST="$WORKSPACE_ROOT/FocusApp-Final.apk"
 
 if [ -f "$SIGNED_APK" ]; then
   echo "Copying signed release APK -> $DEST"
@@ -90,6 +98,7 @@ elif [ -f "$UNSIGNED_APK" ]; then
   echo "  Add a signingConfig in app/build.gradle to fix this."
   echo "Copying unsigned APK anyway -> $DEST"
   cp "$UNSIGNED_APK" "$DEST"
+  echo "✔ Done (unsigned): $DEST"
 else
   echo "ERROR: No release APK found in $RELEASE_APK_DIR" >&2
   ls -la "$RELEASE_APK_DIR" 2>&1 || echo "(directory does not exist — gradle did not produce a release artifact)"
