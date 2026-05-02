@@ -57,6 +57,41 @@ echo "Building from: $ANDROID_PROJECT_DIR"
 cd "$ANDROID_PROJECT_DIR"
 
 GRADLE_OPTS="-Xmx768m -XX:-UsePerfData" \
-  ./gradlew assembleDebug \
+  ./gradlew assembleRelease \
     --no-parallel \
     --no-daemon
+
+# ── APK extraction ───────────────────────────────────────────────────────────
+# After cd into ANDROID_PROJECT_DIR above, the APK lands in:
+#   app/build/outputs/apk/release/app-release.apk
+#
+# NOTE: Without a signing config in app/build.gradle, Gradle emits
+# `app-release-unsigned.apk` instead — unsigned APKs cannot be installed on
+# any Android device. We copy whichever one is produced and warn if it's
+# unsigned, so the build doesn't fail silently in that case.
+RELEASE_APK_DIR="app/build/outputs/apk/release"
+SIGNED_APK="$RELEASE_APK_DIR/app-release.apk"
+UNSIGNED_APK="$RELEASE_APK_DIR/app-release-unsigned.apk"
+DEST="$SCRIPT_DIR/FocusApp-Release.apk"
+
+# SCRIPT_DIR isn't set yet — derive it now from the original invocation.
+# We were cd'd into the android project, so go back via the absolute path
+# resolved at the start of the script.
+WORKSPACE_ROOT="$(cd "$OLDPWD" 2>/dev/null && pwd)" || WORKSPACE_ROOT="$(pwd)/../.."
+DEST="$WORKSPACE_ROOT/FocusApp-Release.apk"
+
+if [ -f "$SIGNED_APK" ]; then
+  echo "Copying signed release APK -> $DEST"
+  cp "$SIGNED_APK" "$DEST"
+  echo "✔ Done: $DEST"
+elif [ -f "$UNSIGNED_APK" ]; then
+  echo "WARNING: Only an UNSIGNED release APK was produced."
+  echo "  This will NOT install on any Android device until signed."
+  echo "  Add a signingConfig in app/build.gradle to fix this."
+  echo "Copying unsigned APK anyway -> $DEST"
+  cp "$UNSIGNED_APK" "$DEST"
+else
+  echo "ERROR: No release APK found in $RELEASE_APK_DIR" >&2
+  ls -la "$RELEASE_APK_DIR" 2>&1 || echo "(directory does not exist — gradle did not produce a release artifact)"
+  exit 1
+fi
