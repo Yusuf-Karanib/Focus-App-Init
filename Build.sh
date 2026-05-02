@@ -13,7 +13,7 @@ rm -rf "$ANDROID_PROJECT_DIR/build"
 rm -rf "$ANDROID_PROJECT_DIR/.gradle"
 
 echo "Cleaning gradle temp dirs..."
-rm -rf /tmp/.gradle-* /tmp/gradle-* /tmp/build-logs 2>/dev/null || true
+rm -rf /tmp/.gradle-* /tmp/gradle-* 2>/dev/null || true
 rm -rf "$HOME/.gradle/caches/transforms-"* 2>/dev/null || true
 
 # ── Java ────────────────────────────────────────────────────────────────────

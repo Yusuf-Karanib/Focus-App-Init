@@ -31,7 +31,8 @@
         }
       ],
       "expo-font",
-      "expo-web-browser"
+      "expo-web-browser",
+      "./modules/focus-module/app.plugin.js"
     ],
     "experiments": {
       "typedRoutes": true,
