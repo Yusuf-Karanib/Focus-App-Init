@@ -22,6 +22,7 @@ export interface FocusModuleType {
   openAccessibilitySettings(): void;
   getInstalledApps(): InstalledApp[];
   launchApp(packageName: string): boolean;
+  promptDefaultLauncher(): boolean;
 }
 
 const noop: FocusModuleType = {
@@ -37,6 +38,14 @@ const noop: FocusModuleType = {
   },
   getInstalledApps: () => [],
   launchApp: () => false,
+  promptDefaultLauncher: () => {
+    if (__DEV__) {
+      console.warn(
+        "[FocusModule] promptDefaultLauncher() unavailable on this platform."
+      );
+    }
+    return false;
+  },
 };
 
 let nativeModule: FocusModuleType;
@@ -123,4 +132,32 @@ export function getInstalledApps(): InstalledApp[] {
  */
 export function launchApp(packageName: string): boolean {
   return nativeModule.launchApp(packageName);
+}
+
+/**
+ * Open the system "Default Home app" picker so the user can select FocusApp
+ * (or any other launcher) as their default home screen.
+ *
+ * Android does not allow apps to make themselves the default launcher
+ * programmatically — by design, this choice always belongs to the user.
+ * This function is the closest legal equivalent: it deep-links straight
+ * into the picker so the user only has to tap "FocusApp" → "Always" to
+ * complete the flow.
+ *
+ * Returns `true` if the picker opened, `false` if the device's Settings
+ * app doesn't expose this screen (rare; mostly Android-TV, Wear, or kiosk
+ * ROMs). Never throws — UIs can call this on a tap without try/catch and
+ * fall back on the boolean result, e.g. by showing a manual instruction.
+ *
+ * On web and inside Expo Go this is a safe no-op that returns `false`
+ * (and logs a warning in dev).
+ *
+ * Typical usage:
+ * ```ts
+ * const ok = promptDefaultLauncher();
+ * if (!ok) Alert.alert("Open Settings → Apps → Default apps → Home app");
+ * ```
+ */
+export function promptDefaultLauncher(): boolean {
+  return nativeModule.promptDefaultLauncher();
 }
