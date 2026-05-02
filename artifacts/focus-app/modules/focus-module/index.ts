@@ -44,3 +44,29 @@ export default FocusModule;
 
 export const isFocusModuleAvailable: boolean =
   Platform.OS === "android" && nativeModule !== noop;
+
+/**
+ * Save the list of blocked Android package names to native SharedPreferences.
+ * The FocusAccessibilityService reads this list and forces the user back to
+ * the home screen whenever a matching app comes to the foreground.
+ *
+ * On web and inside Expo Go this is a safe no-op that returns 0.
+ *
+ * @param apps Array of package names, e.g. ["com.instagram.android"]
+ * @returns The number of packages that were saved.
+ */
+export function setBlockedApps(apps: string[]): number {
+  return nativeModule.setBlockedApps(apps);
+}
+
+export function getBlockedApps(): string[] {
+  return nativeModule.getBlockedApps();
+}
+
+export function isServiceEnabled(): boolean {
+  return nativeModule.isServiceEnabled();
+}
+
+export function openAccessibilitySettings(): void {
+  nativeModule.openAccessibilitySettings();
+}
