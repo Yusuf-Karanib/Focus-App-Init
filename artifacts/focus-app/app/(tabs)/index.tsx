@@ -1,27 +1,22 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
-  KeyboardAvoidingView,
+  FlatList,
+  ListRenderItemInfo,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 
-import { FocusModule, isFocusModuleAvailable } from "../../modules/focus-module";
-
-const DEFAULT_BLOCKED: string[] = [
-  "com.instagram.android",
-  "com.zhiliaoapp.musically",
-  "com.google.android.youtube",
-];
-
-const PACKAGE_REGEX = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/i;
+import {
+  FocusModule,
+  InstalledApp,
+  isFocusModuleAvailable,
+} from "../../modules/focus-module";
 
 const BG = "#000000";
 const FG = "#ffffff";
@@ -32,222 +27,195 @@ const MONO = Platform.select({
   default: "monospace",
 });
 
+// How long the "BLOCKED" warning stays visible after tapping a blocked app.
+const WARNING_VISIBLE_MS = 2_500;
+
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
 
-  const [isEnabled, setIsEnabled] = useState(false);
-  const [packageInput, setPackageInput] = useState("");
-  const [blockedPackages, setBlockedPackages] = useState<string[]>(DEFAULT_BLOCKED);
-  const [error, setError] = useState<string | null>(null);
-  const [serviceEnabled, setServiceEnabled] = useState<boolean>(false);
+  const [apps, setApps] = useState<InstalledApp[]>([]);
+  const [blockedSet, setBlockedSet] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState<boolean>(true);
+  const [warning, setWarning] = useState<string | null>(null);
 
-  const checkServiceStatus = useCallback(() => {
+  // Keep a ref to the warning timer so we can cancel it if a new warning
+  // arrives before the previous one has cleared.
+  const warningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Data load ──────────────────────────────────────────────────────────
+  const loadAll = useCallback(() => {
+    let installed: InstalledApp[] = [];
+    let blocked: string[] = [];
     try {
-      setServiceEnabled(FocusModule.isServiceEnabled());
+      installed = FocusModule.getInstalledApps();
     } catch {
-      setServiceEnabled(false);
+      installed = [];
     }
+    try {
+      blocked = FocusModule.getBlockedApps();
+    } catch {
+      blocked = [];
+    }
+    setApps(installed);
+    setBlockedSet(new Set(blocked));
+    setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (!isFocusModuleAvailable) return;
-    try {
-      const existing = FocusModule.getBlockedApps();
-      if (existing.length > 0) setBlockedPackages(existing);
-    } catch {
-      /* keep defaults */
-    }
-  }, []);
+    loadAll();
+  }, [loadAll]);
 
+  // Re-sync whenever the launcher comes back to the foreground — the user
+  // may have installed / uninstalled apps, or changed the blocklist from
+  // somewhere else.
   useEffect(() => {
-    checkServiceStatus();
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") checkServiceStatus();
+      if (state === "active") loadAll();
     });
     return () => sub.remove();
-  }, [checkServiceStatus]);
+  }, [loadAll]);
 
+  // Clean up the warning timer on unmount.
   useEffect(() => {
-    try {
-      FocusModule.setBlockedApps(blockedPackages);
-    } catch {
-      /* no-op fallback handles web/Expo Go */
-    }
-  }, [blockedPackages]);
+    return () => {
+      if (warningTimer.current) clearTimeout(warningTimer.current);
+    };
+  }, []);
 
-  const trimmedInput = packageInput.trim().toLowerCase();
-  const isValidInput = useMemo(() => PACKAGE_REGEX.test(trimmedInput), [trimmedInput]);
-  const isDuplicate = blockedPackages.includes(trimmedInput);
-  const addDisabled = !trimmedInput || !isValidInput || isDuplicate;
-
-  function tap(style: Haptics.ImpactFeedbackStyle = Haptics.ImpactFeedbackStyle.Light) {
-    if (Platform.OS !== "web") Haptics.impactAsync(style);
-  }
-
-  function handleToggle() {
-    tap(
-      !isEnabled
-        ? Haptics.ImpactFeedbackStyle.Medium
-        : Haptics.ImpactFeedbackStyle.Light
+  // ── Sorted list (alphabetical, case-insensitive) ───────────────────────
+  // Native side already sorts by lowercased name, but we re-sort defensively
+  // so this stays correct even if a future change drops the native ordering.
+  const sortedApps = useMemo(() => {
+    return [...apps].sort((a, b) =>
+      a.name.toLowerCase().localeCompare(b.name.toLowerCase())
     );
-    setIsEnabled((v) => !v);
+  }, [apps]);
+
+  // ── Tap handler ────────────────────────────────────────────────────────
+  const handleTap = useCallback(
+    (app: InstalledApp) => {
+      if (blockedSet.has(app.packageName)) {
+        if (Platform.OS !== "web") {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        }
+        showWarning(`BLOCKED: ${app.name.toUpperCase()}`);
+        return;
+      }
+
+      if (Platform.OS !== "web") {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+
+      const ok = (() => {
+        try {
+          return FocusModule.launchApp(app.packageName);
+        } catch {
+          return false;
+        }
+      })();
+
+      if (!ok) {
+        showWarning(`COULDN'T LAUNCH: ${app.name.toUpperCase()}`);
+      }
+    },
+    [blockedSet]
+  );
+
+  function showWarning(message: string) {
+    if (warningTimer.current) clearTimeout(warningTimer.current);
+    setWarning(message);
+    warningTimer.current = setTimeout(() => {
+      setWarning(null);
+      warningTimer.current = null;
+    }, WARNING_VISIBLE_MS);
   }
 
-  function handleGrantPermission() {
-    tap(Haptics.ImpactFeedbackStyle.Medium);
-    try {
-      FocusModule.openAccessibilitySettings();
-    } catch {
-      /* no-op fallback */
-    }
-  }
-
-  function handleAdd() {
-    setError(null);
-    if (!trimmedInput) return setError("ENTER A PACKAGE NAME FIRST.");
-    if (!isValidInput)
-      return setError('USE A FORMAT LIKE "COM.INSTAGRAM.ANDROID".');
-    if (isDuplicate) return setError("THAT APP IS ALREADY ON THE BLOCKLIST.");
-
-    setBlockedPackages((prev) => [...prev, trimmedInput]);
-    setPackageInput("");
-    if (Platform.OS !== "web") {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-  }
-
-  function handleRemove(pkg: string) {
-    setBlockedPackages((prev) => prev.filter((p) => p !== pkg));
-    tap();
-  }
-
-  const topPad = Platform.OS === "web" ? 67 : insets.top;
-
-  return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: BG }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
-      <ScrollView
-        style={styles.root}
-        contentContainerStyle={[
-          styles.content,
-          {
-            paddingTop: topPad + 24,
-            paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 24),
-          },
-        ]}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Header */}
-        <Text style={styles.appName}>FOCUSAPP</Text>
-
-        <View style={styles.divider} />
-
-        {/* Permission warning — plain text */}
-        {!serviceEnabled && (
-          <>
-            <Text style={styles.warnLabel}>! NO ACCESSIBILITY PERMISSION</Text>
-            <Text style={styles.warnBody}>
-              REQUIRED TO BLOCK APPS. WITHOUT IT, FOCUS MODE DOES NOTHING.
-            </Text>
-            <Pressable onPress={handleGrantPermission} hitSlop={10}>
-              {({ pressed }) => (
-                <Text style={[styles.action, pressed && styles.pressed]}>
-                  [ GRANT PERMISSION ]
-                </Text>
-              )}
-            </Pressable>
-            <View style={styles.divider} />
-          </>
-        )}
-
-        {/* Focus Mode — text toggle */}
-        <Text style={styles.sectionLabel}>FOCUS MODE</Text>
-        <Pressable onPress={handleToggle} hitSlop={10}>
-          {({ pressed }) => (
-            <Text style={[styles.bigToggle, pressed && styles.pressed]}>
-              [ {isEnabled ? "ON " : "OFF"} ]
-            </Text>
-          )}
-        </Pressable>
-        <Text style={styles.statusLine}>
-          {isEnabled
-            ? `BLOCKING ${blockedPackages.length} APP${blockedPackages.length === 1 ? "" : "S"}`
-            : "TAP TO START"}
-        </Text>
-
-        <View style={styles.divider} />
-
-        {/* Add to blocklist */}
-        <Text style={styles.sectionLabel}>ADD PACKAGE</Text>
-        <TextInput
-          value={packageInput}
-          onChangeText={(t) => {
-            setPackageInput(t);
-            if (error) setError(null);
-          }}
-          placeholder="com.example.app"
-          placeholderTextColor="#666666"
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          returnKeyType="done"
-          onSubmitEditing={handleAdd}
-          style={styles.input}
-          underlineColorAndroid="transparent"
-        />
-        <Pressable onPress={handleAdd} disabled={addDisabled} hitSlop={10}>
+  // ── Row renderer ───────────────────────────────────────────────────────
+  const renderItem = useCallback(
+    ({ item }: ListRenderItemInfo<InstalledApp>) => {
+      const isBlocked = blockedSet.has(item.packageName);
+      return (
+        <Pressable
+          onPress={() => handleTap(item)}
+          hitSlop={4}
+          accessibilityRole="button"
+          accessibilityLabel={
+            isBlocked ? `${item.name} (blocked)` : `Launch ${item.name}`
+          }
+        >
           {({ pressed }) => (
             <Text
               style={[
-                styles.action,
-                addDisabled && styles.actionDisabled,
-                pressed && !addDisabled && styles.pressed,
+                styles.row,
+                isBlocked && styles.rowBlocked,
+                pressed && styles.rowPressed,
               ]}
+              numberOfLines={1}
+              ellipsizeMode="tail"
             >
-              [ ADD ]
+              {item.name}
             </Text>
           )}
         </Pressable>
-        {error && <Text style={styles.errorText}>{error}</Text>}
+      );
+    },
+    [blockedSet, handleTap]
+  );
 
-        <View style={styles.divider} />
+  const keyExtractor = useCallback(
+    (item: InstalledApp) => item.packageName,
+    []
+  );
 
-        {/* Blocklist — plain text */}
-        <Text style={styles.sectionLabel}>
-          BLOCKLIST ({blockedPackages.length})
-        </Text>
-        {blockedPackages.length === 0 ? (
-          <Text style={styles.bodyMuted}>NONE.</Text>
-        ) : (
-          blockedPackages.map((pkg) => (
-            <View key={pkg} style={styles.listLine}>
-              <Text style={styles.listText} numberOfLines={1} ellipsizeMode="middle">
-                {`- ${pkg}`}
-              </Text>
-              <Pressable onPress={() => handleRemove(pkg)} hitSlop={10}>
-                {({ pressed }) => (
-                  <Text style={[styles.removeText, pressed && styles.pressed]}>
-                    [X]
-                  </Text>
-                )}
-              </Pressable>
-            </View>
-          ))
-        )}
-      </ScrollView>
-    </KeyboardAvoidingView>
+  // ── Header / footer ────────────────────────────────────────────────────
+  const topPad = Platform.OS === "web" ? 67 : insets.top;
+
+  const Header = (
+    <View style={{ paddingHorizontal: 20 }}>
+      <Text style={styles.appName}>FOCUSAPP</Text>
+      <View style={styles.divider} />
+      {warning && <Text style={styles.warning}>{warning}</Text>}
+    </View>
+  );
+
+  const Empty = (
+    <View style={{ paddingHorizontal: 20 }}>
+      <Text style={styles.bodyMuted}>
+        {loading
+          ? "LOADING APPS…"
+          : isFocusModuleAvailable
+            ? "NO LAUNCHABLE APPS FOUND."
+            : "NO APPS AVAILABLE — RUN ON AN ANDROID DEVICE."}
+      </Text>
+    </View>
+  );
+
+  return (
+    <View style={[styles.root, { paddingTop: topPad + 24 }]}>
+      <FlatList
+        data={sortedApps}
+        renderItem={renderItem}
+        keyExtractor={keyExtractor}
+        ListHeaderComponent={Header}
+        ListEmptyComponent={Empty}
+        contentContainerStyle={{
+          paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 24),
+        }}
+        showsVerticalScrollIndicator={false}
+        initialNumToRender={20}
+        windowSize={10}
+        removeClippedSubviews
+      />
+    </View>
   );
 }
 
-/* ── Styles — strictly monochrome, no borders/shadows/rounded corners ───── */
+/* ── Styles — strict monochrome, no borders / shadows / rounded corners ─── */
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: BG },
-  content: {
-    paddingHorizontal: 20,
+  root: {
+    flex: 1,
+    backgroundColor: BG,
   },
 
   appName: {
@@ -262,93 +230,43 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: FG,
-    marginVertical: 16,
+    marginBottom: 16,
   },
 
-  sectionLabel: {
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 1.5,
-    marginBottom: 8,
-  },
-
-  bigToggle: {
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 48,
-    fontWeight: "900",
-    letterSpacing: 2,
-    marginVertical: 4,
-  },
-
-  statusLine: {
-    color: FG,
+  warning: {
+    color: BG,
+    backgroundColor: FG,
     fontFamily: MONO,
     fontSize: 13,
-    letterSpacing: 1,
-    marginTop: 8,
+    fontWeight: "900",
+    letterSpacing: 1.5,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    alignSelf: "flex-start",
+    overflow: "hidden",
+    marginBottom: 16,
   },
 
-  input: {
+  row: {
     color: FG,
-    fontFamily: MONO,
-    fontSize: 16,
-    paddingVertical: 8,
-    paddingHorizontal: 0,
-    borderWidth: 0,
     backgroundColor: BG,
+    fontFamily: MONO,
+    fontSize: 18,
+    fontWeight: "500",
+    letterSpacing: 0.5,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
   },
 
-  action: {
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 16,
-    fontWeight: "700",
-    letterSpacing: 1,
-    marginTop: 12,
+  // Blocked entries are visually muted but still tappable so the user can
+  // see the warning. No strikethrough or icons — just dimmer text.
+  rowBlocked: {
+    color: "#666666",
   },
-  actionDisabled: {
-    color: "#555555",
-  },
-  pressed: {
+
+  // Pressed feedback — uniform across both blocked and launchable rows.
+  rowPressed: {
     color: "#888888",
-  },
-
-  errorText: {
-    color: BG,
-    backgroundColor: FG,
-    fontFamily: MONO,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 1,
-    marginTop: 12,
-    paddingHorizontal: 6,
-    paddingVertical: 4,
-    alignSelf: "flex-start",
-    overflow: "hidden",
-  },
-
-  warnLabel: {
-    color: BG,
-    backgroundColor: FG,
-    fontFamily: MONO,
-    fontSize: 13,
-    fontWeight: "900",
-    letterSpacing: 1.5,
-    paddingHorizontal: 6,
-    paddingVertical: 4,
-    alignSelf: "flex-start",
-    overflow: "hidden",
-    marginBottom: 8,
-  },
-  warnBody: {
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 12,
-    letterSpacing: 0.8,
-    lineHeight: 18,
   },
 
   bodyMuted: {
@@ -356,25 +274,5 @@ const styles = StyleSheet.create({
     fontFamily: MONO,
     fontSize: 14,
     letterSpacing: 1,
-  },
-
-  listLine: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 6,
-  },
-  listText: {
-    flex: 1,
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 14,
-    letterSpacing: 0.5,
-  },
-  removeText: {
-    color: FG,
-    fontFamily: MONO,
-    fontSize: 14,
-    fontWeight: "700",
-    marginLeft: 12,
   },
 });
