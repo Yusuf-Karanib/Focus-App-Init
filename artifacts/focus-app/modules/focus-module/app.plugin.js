@@ -16,6 +16,7 @@ const DEFAULT_CATEGORY = "android.intent.category.DEFAULT";
 
 const QUERY_ALL_PACKAGES = "android.permission.QUERY_ALL_PACKAGES";
 const PACKAGE_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS";
+const WRITE_SECURE_SETTINGS = "android.permission.WRITE_SECURE_SETTINGS";
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -204,6 +205,42 @@ function withPackageUsageStats(config) {
   });
 }
 
+/**
+ * Pass 5: Add WRITE_SECURE_SETTINGS so we can flip the device-wide
+ * grayscale toggle (via the accessibility daltonizer Secure settings).
+ *
+ * IMPORTANT: This is a `signature|privileged` permission. Declaring it
+ * in the manifest is NECESSARY but NOT SUFFICIENT — the OS will not
+ * actually grant it to a sideloaded app, no matter what the manifest
+ * says, no matter what runtime prompt we show. It can only be granted:
+ *
+ *   1. To system-signed apps (signed with the platform key), OR
+ *   2. To apps installed in /system/priv-app/ (root required), OR
+ *   3. Via a one-time ADB command from a paired desktop:
+ *
+ *        adb shell pm grant com.anonymous.focusapp \
+ *          android.permission.WRITE_SECURE_SETTINGS
+ *
+ *      After that single command, the grant persists across reboots and
+ *      across app updates (lost only on uninstall).
+ *
+ * Without that grant, `Settings.Secure.putInt(...)` throws
+ * `SecurityException` and `toggleGrayscale(...)` returns `false`. The UI
+ * should call `hasGrayscalePermission()` first and show the ADB
+ * instructions when it returns false.
+ *
+ * AAPT will emit a "ProtectedPermissions" lint warning for this
+ * declaration. That is expected and correct for non-system apps; the
+ * build still succeeds and the permission still appears in the merged
+ * manifest, which is what `pm grant` keys off.
+ */
+function withWriteSecureSettings(config) {
+  return withAndroidManifest(config, (mod) => {
+    ensurePermission(mod.modResults, WRITE_SECURE_SETTINGS);
+    return mod;
+  });
+}
+
 /* ── Compose ──────────────────────────────────────────────────────────────── */
 
 function withFocusModule(config) {
@@ -211,6 +248,7 @@ function withFocusModule(config) {
   config = withHomeLauncher(config);
   config = withQueryAllPackages(config);
   config = withPackageUsageStats(config);
+  config = withWriteSecureSettings(config);
   return config;
 }
 
