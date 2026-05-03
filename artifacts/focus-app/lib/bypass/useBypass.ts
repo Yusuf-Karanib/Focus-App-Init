@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 
 import {
@@ -24,6 +24,12 @@ export type BypassRequestResult =
   | { kind: "needs-wait"; cooldownEndsAt: number };
 
 export interface UseBypassResult {
+  /**
+   * Raw bypass records as currently held in state. Exposed so callers
+   * can render history / debug views; most consumers only need the
+   * derived `bypassedPackages` / `inCooldown` fields below.
+   */
+  records: BypassRecord[];
   /** False until the initial AsyncStorage read resolves. */
   loaded: boolean;
   /**
@@ -65,6 +71,12 @@ export function useBypass(): UseBypassResult {
   const [records, setRecords] = useState<BypassRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
 
+  // Mirror of `records` used to make `requestBypass` atomic against
+  // rapid double-invocations. Render-derived `inCooldown` can be stale
+  // for a tick after `setRecords`, so the mutator path consults this
+  // ref instead and writes through it synchronously.
+  const recordsRef = useRef<BypassRecord[]>([]);
+
   // Same minute-aligned tick pattern as `useFocusProfiles` — bumps once a
   // minute (and on app foregrounding) so derived values like
   // `bypassedPackages` re-eval as bypass windows expire.
@@ -76,6 +88,7 @@ export function useBypass(): UseBypassResult {
     loadBypassRecords().then(
       (r) => {
         if (cancelled) return;
+        recordsRef.current = r;
         setRecords(r);
         setLoaded(true);
       },
@@ -95,7 +108,10 @@ export function useBypass(): UseBypassResult {
   useEffect(() => {
     return subscribeToBypassChanges(() => {
       loadBypassRecords().then(
-        (r) => setRecords(r),
+        (r) => {
+          recordsRef.current = r;
+          setRecords(r);
+        },
         () => {
           /* swallow */
         }
@@ -173,6 +189,10 @@ export function useBypass(): UseBypassResult {
   }, [records, tick]);
 
   // ── Mutators ──────────────────────────────────────────────────────────
+  // `appendRecord` writes through `recordsRef` SYNCHRONOUSLY before
+  // queuing the React state update, so a follow-up call within the same
+  // tick sees the new record. This is what makes the cooldown check
+  // race-free against rapid double-taps.
   const appendRecord = useCallback((pkg: string): BypassRecord => {
     const now = Date.now();
     const record: BypassRecord = {
@@ -180,27 +200,39 @@ export function useBypass(): UseBypassResult {
       grantedAt: now,
       expiresAt: now + BYPASS_DURATION_MS,
     };
-    setRecords((current) => {
-      const next = [...current, record];
-      // Persist asynchronously; the bus fires from inside saveBypassRecords
-      // so other instances pick up the change.
-      saveBypassRecords(next).catch(() => {
-        /* best-effort */
-      });
-      return next;
+    const next = [...recordsRef.current, record];
+    recordsRef.current = next;
+    setRecords(next);
+    // Persist asynchronously; the bus fires from inside saveBypassRecords
+    // so other instances pick up the change.
+    saveBypassRecords(next).catch(() => {
+      /* best-effort */
     });
     return record;
   }, []);
 
   const requestBypass = useCallback(
     (pkg: string): BypassRequestResult => {
-      if (inCooldown && cooldownEndsAt != null) {
-        return { kind: "needs-wait", cooldownEndsAt };
+      // Atomically check cooldown against the LATEST records (not the
+      // memoized render-state), so two synchronous calls in the same
+      // tick can never both be granted.
+      const now = Date.now();
+      let latestGrant = -Infinity;
+      for (const r of recordsRef.current) {
+        if (r.grantedAt + BYPASS_COOLDOWN_MS > now && r.grantedAt > latestGrant) {
+          latestGrant = r.grantedAt;
+        }
+      }
+      if (latestGrant !== -Infinity) {
+        return {
+          kind: "needs-wait",
+          cooldownEndsAt: latestGrant + BYPASS_COOLDOWN_MS,
+        };
       }
       const record = appendRecord(pkg);
       return { kind: "granted", expiresAt: record.expiresAt };
     },
-    [inCooldown, cooldownEndsAt, appendRecord]
+    [appendRecord]
   );
 
   const forceBypass = useCallback(
@@ -212,6 +244,7 @@ export function useBypass(): UseBypassResult {
   );
 
   return {
+    records,
     loaded,
     bypassedPackages,
     inCooldown,
