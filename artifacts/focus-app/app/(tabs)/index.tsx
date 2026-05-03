@@ -19,7 +19,8 @@ import {
   FocusModule,
   InstalledApp,
 } from "../../modules/focus-module";
-import { useFocusProfiles } from "../../lib/profiles";
+import { useBlocklistSync, useFocusProfiles } from "../../lib/profiles";
+import { useBypass } from "../../lib/bypass";
 
 const BG = "#000000";
 const FG = "#ffffff";
@@ -41,6 +42,35 @@ const WARNING_VISIBLE_MS = 2_500;
 // to feel like deliberate friction rather than punishment. Adjust here if the
 // number ever needs tuning — single source of truth.
 const MINDFUL_DELAY_SECONDS = 15;
+
+// ── Bypass limit wait ───────────────────────────────────────────────────────
+// When the user has already used their one free Emergency Bypass within the
+// last 24h and tries to bypass again, we surface a "Bypass Limit Reached"
+// screen with a forced wait. The OVERRIDE button is hidden until the counter
+// hits zero — same UX shape as the Mindful Delay overlay above, but longer
+// (60s vs 15s) and harder to dismiss because the user is actively pushing
+// against a limit they themselves set. Adjust here if the duration ever
+// needs tuning — single source of truth.
+const BYPASS_WAIT_SECONDS = 60;
+
+/**
+ * Format the remaining cooldown until the next FREE bypass as a short
+ * monospace-friendly string. Examples: "23M", "4H 12M", "0M". Used as
+ * a small subtle label on the limit screen so the user knows roughly
+ * when the next bypass becomes available without an override.
+ *
+ * Always rounds UP to the next whole minute — saying "0M" while there
+ * are still 30 seconds on the clock would be a lie that invites
+ * frustration when the next attempt also hits the limit.
+ */
+function formatCooldownRemaining(endsAt: number): string {
+  const ms = Math.max(0, endsAt - Date.now());
+  const totalMin = Math.ceil(ms / 60_000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0) return `${h}H ${m}M`;
+  return `${m}M`;
+}
 
 // ── Friction phrases ────────────────────────────────────────────────────────
 // Pool of phrases the user must type verbatim to disable Focus Mode. Picked
@@ -70,12 +100,39 @@ export default function HomeScreen() {
 
   const router = useRouter();
 
-  // Source of truth for the blocked set is now Focus Profiles. The hook
-  // loads profiles from AsyncStorage, evaluates which schedules are active
-  // RIGHT NOW, and pushes the resulting union to the native AccessibilityService
-  // (via FocusModule.setBlockedApps). The launcher just consumes the
-  // already-computed set for row-dimming and the Mindful Delay gate.
-  const { activeBlockedSet: blockedSet } = useFocusProfiles();
+  // ── Source of truth for the EFFECTIVE blocked set ────────────────────
+  // Two inputs combine here:
+  //   1. Focus Profiles — the schedule-driven blocklist.
+  //   2. Emergency Bypass — packages temporarily unblocked for 10 minutes.
+  // The effective set is `profilesActive - bypassed`. We push that set
+  // (not just the profiles set) to the native AccessibilityService so a
+  // bypass means the app actually opens — without this subtraction, the
+  // service would re-intercept the launch immediately after CONTINUE.
+  //
+  // useBlocklistSync is mounted from EXACTLY ONE screen (this one) — the
+  // profiles screen also reads useFocusProfiles for its list, but does
+  // not push to native. Two pushers would race to write different
+  // snapshots to SharedPreferences.
+  const { activePackages, loaded: profilesLoaded } = useFocusProfiles();
+  const {
+    bypassedPackages,
+    cooldownEndsAt,
+    loaded: bypassLoaded,
+    requestBypass,
+    forceBypass,
+  } = useBypass();
+
+  const effectivePackages = useMemo(() => {
+    if (bypassedPackages.size === 0) return activePackages;
+    return activePackages.filter((p) => !bypassedPackages.has(p));
+  }, [activePackages, bypassedPackages]);
+
+  const blockedSet = useMemo(
+    () => new Set(effectivePackages),
+    [effectivePackages]
+  );
+
+  useBlocklistSync(effectivePackages, profilesLoaded && bypassLoaded);
 
   const [apps, setApps] = useState<InstalledApp[]>([]);
   // Hidden apps are stronger than blocked apps: blocked apps still appear
@@ -113,6 +170,18 @@ export default function HomeScreen() {
   );
   const [mindfulSecondsLeft, setMindfulSecondsLeft] = useState<number>(
     MINDFUL_DELAY_SECONDS
+  );
+
+  // ── Bypass Limit state ─────────────────────────────────────────────────
+  // Shown when the user has already burned their daily bypass and the
+  // Mindful Delay's CONTINUE handler routes here instead of launching.
+  // Same shape as Mindful Delay (target + countdown), but the action at
+  // the end is OVERRIDE (force a bypass anyway) rather than CONTINUE.
+  const [bypassLimitApp, setBypassLimitApp] = useState<InstalledApp | null>(
+    null
+  );
+  const [bypassWaitSecondsLeft, setBypassWaitSecondsLeft] = useState<number>(
+    BYPASS_WAIT_SECONDS
   );
 
   // Keep a ref to the warning timer so we can cancel it if a new warning
@@ -171,6 +240,20 @@ export default function HomeScreen() {
     }, 1000);
     return () => clearInterval(id);
   }, [mindfulDelayApp]);
+
+  // ── Bypass Limit countdown ─────────────────────────────────────────────
+  // Same pattern as the Mindful Delay countdown above. Reset on open,
+  // tick every second, clamp at 0. The OVERRIDE button below is gated
+  // on `bypassWaitSecondsLeft === 0` so the interval keeping going past
+  // zero is harmless.
+  useEffect(() => {
+    if (!bypassLimitApp) return;
+    setBypassWaitSecondsLeft(BYPASS_WAIT_SECONDS);
+    const id = setInterval(() => {
+      setBypassWaitSecondsLeft((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [bypassLimitApp]);
 
   // ── Visible list (filter hidden, then sort alphabetically) ─────────────
   // Order matters: filter first so we don't waste cycles sorting entries
@@ -295,19 +378,53 @@ export default function HomeScreen() {
     setMindfulDelayApp(null);
   }, []);
 
-  // CONTINUE — only valid once the countdown has hit zero. We snapshot the
-  // target app into a local var BEFORE clearing it, because closing the
-  // modal triggers the cleanup useEffect which can race with the launchApp
-  // call if we read from state. Light haptic (not Warning) — the user has
-  // earned this; no shaming.
+  // CONTINUE — only valid once the countdown has hit zero. With Emergency
+  // Bypass in place, this no longer just launches the app: it requests a
+  // 10-minute bypass first. If granted, the package leaves the active
+  // blocked set and the app actually opens (without bypass, the
+  // AccessibilityService would re-intercept). If refused (one bypass per
+  // 24h already used), we close this overlay and pivot to the Bypass
+  // Limit screen with the same target — the user can wait 60s and
+  // OVERRIDE from there.
   const confirmMindfulDelay = useCallback(() => {
     if (mindfulSecondsLeft > 0) return;
     const target = mindfulDelayApp;
-    setMindfulDelayApp(null);
     if (!target) return;
+
+    const result = requestBypass(target.packageName);
+
+    if (result.kind === "needs-wait") {
+      // Hand off to the Bypass Limit modal. No haptic here — the user is
+      // about to be confronted with an explicit limit-reached screen,
+      // and a buzz at this exact transition would feel like a punishment
+      // double-tap. Let the screen do the talking.
+      setMindfulDelayApp(null);
+      setBypassLimitApp(target);
+      return;
+    }
+
+    // Granted. Close the Mindful Delay and launch.
+    setMindfulDelayApp(null);
     if (Platform.OS !== "web") {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
+
+    // ── Optimistic native push BEFORE launchApp ───────────────────────
+    // The bypass record was just appended to React state, but useBlocklistSync's
+    // effect won't fire until the next render — and by then we'll have
+    // already called launchApp, which the AccessibilityService would
+    // intercept because its SharedPreferences still says the package is
+    // blocked. Push the new effective set synchronously here so the
+    // service sees the unblock before the launch event arrives.
+    const newEffective = effectivePackages.filter(
+      (p) => p !== target.packageName
+    );
+    try {
+      FocusModule.setBlockedApps(newEffective);
+    } catch {
+      /* swallow — fail-safe is "still blocked", which is acceptable */
+    }
+
     const ok = (() => {
       try {
         return FocusModule.launchApp(target.packageName);
@@ -318,7 +435,67 @@ export default function HomeScreen() {
     if (!ok) {
       showWarning(`COULDN'T LAUNCH: ${target.name.toUpperCase()}`);
     }
-  }, [mindfulDelayApp, mindfulSecondsLeft]);
+  }, [
+    mindfulDelayApp,
+    mindfulSecondsLeft,
+    requestBypass,
+    effectivePackages,
+    showWarning,
+  ]);
+
+  // ── Bypass Limit handlers ─────────────────────────────────────────────
+  // STAY FOCUSED on the limit screen mirrors STAY FOCUSED on the Mindful
+  // Delay overlay: success haptic, just close. The user has chosen to
+  // honour the limit they set themselves; that's a win.
+  const cancelBypassLimit = useCallback(() => {
+    if (Platform.OS !== "web") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    setBypassLimitApp(null);
+  }, []);
+
+  // OVERRIDE — only valid once the 60s wait has elapsed. Forces a bypass
+  // (without resetting the cooldown — the new record is appended to the
+  // log so a third attempt in the same 24h also hits the limit screen
+  // with its own 60s wait), then does the same optimistic native push +
+  // launchApp dance as the granted path of confirmMindfulDelay.
+  const overrideBypassLimit = useCallback(() => {
+    if (bypassWaitSecondsLeft > 0) return;
+    const target = bypassLimitApp;
+    if (!target) return;
+
+    setBypassLimitApp(null);
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    forceBypass(target.packageName);
+
+    const newEffective = effectivePackages.filter(
+      (p) => p !== target.packageName
+    );
+    try {
+      FocusModule.setBlockedApps(newEffective);
+    } catch {
+      /* swallow */
+    }
+
+    const ok = (() => {
+      try {
+        return FocusModule.launchApp(target.packageName);
+      } catch {
+        return false;
+      }
+    })();
+    if (!ok) {
+      showWarning(`COULDN'T LAUNCH: ${target.name.toUpperCase()}`);
+    }
+  }, [
+    bypassLimitApp,
+    bypassWaitSecondsLeft,
+    forceBypass,
+    effectivePackages,
+    showWarning,
+  ]);
 
   // ── Row renderer ───────────────────────────────────────────────────────
   const renderItem = useCallback(
@@ -600,6 +777,97 @@ export default function HomeScreen() {
         </View>
       </Modal>
 
+      {/* ── Bypass Limit overlay ────────────────────────────────────────
+          Surfaced when CONTINUE on the Mindful Delay would have
+          requested a bypass but the user is still inside the 24h
+          cooldown from a previous one. Forces a 60-second wait before
+          OVERRIDE becomes available; STAY FOCUSED is available
+          throughout. Visually mirrors the Mindful Delay (same warn
+          bar, same big countdown, same monospace) so the language of
+          friction stays consistent — but the copy is stricter and the
+          delay is 4× longer because this is a self-imposed limit the
+          user is actively trying to violate.
+      */}
+      <Modal
+        visible={bypassLimitApp !== null}
+        transparent={false}
+        animationType="none"
+        onRequestClose={cancelBypassLimit}
+        statusBarTranslucent
+      >
+        <View style={styles.modalRoot}>
+          <View style={[styles.modalInner, { paddingTop: topPad + 24 }]}>
+            <Text style={styles.appName}>FOCUSAPP</Text>
+            <View style={styles.divider} />
+
+            <Text style={styles.modalWarnBar}>
+              {"  ! BYPASS LIMIT REACHED  "}
+            </Text>
+
+            <Text style={styles.modalBody}>
+              YOU'VE ALREADY USED YOUR DAILY BYPASS.{"\n"}
+              WAIT {BYPASS_WAIT_SECONDS} SECONDS BEFORE OVERRIDING.
+            </Text>
+
+            <View style={styles.mindfulCountdownWrap}>
+              <Text style={styles.mindfulCountdown}>
+                {String(bypassWaitSecondsLeft).padStart(2, "0")}
+              </Text>
+              <Text style={styles.mindfulCountdownLabel}>SECONDS</Text>
+            </View>
+
+            {cooldownEndsAt != null && (
+              <Text style={styles.bypassNextLabel}>
+                {`NEXT FREE BYPASS IN ${formatCooldownRemaining(cooldownEndsAt)}`}
+              </Text>
+            )}
+
+            <View style={styles.modalSpacer} />
+
+            <Pressable
+              onPress={cancelBypassLimit}
+              accessibilityRole="button"
+              accessibilityLabel="Stay focused and go back"
+            >
+              {({ pressed }) => (
+                <Text
+                  style={[
+                    styles.modalAction,
+                    pressed && styles.modalActionPressed,
+                  ]}
+                >
+                  [ STAY FOCUSED — GO BACK ]
+                </Text>
+              )}
+            </Pressable>
+
+            {/* OVERRIDE is fully hidden (not disabled) until the wait
+                completes — same reasoning as the Mindful Delay overlay's
+                CONTINUE button. A visible-but-unreachable button during
+                a forced wait invites anxious tapping and undermines the
+                whole point of the timer. */}
+            {bypassWaitSecondsLeft === 0 && (
+              <Pressable
+                onPress={overrideBypassLimit}
+                accessibilityRole="button"
+                accessibilityLabel={`Override and open ${bypassLimitApp?.name ?? ""}`}
+              >
+                {({ pressed }) => (
+                  <Text
+                    style={[
+                      styles.modalAction,
+                      pressed && styles.modalActionPressed,
+                    ]}
+                  >
+                    {`[ OVERRIDE — OPEN ${(bypassLimitApp?.name ?? "").toUpperCase()} ]`}
+                  </Text>
+                )}
+              </Pressable>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       {/*
         TODO (next step): wire `focusModeEnabled` to the native module so
         that when OFF the AccessibilityService stops launching NudgeActivity
@@ -616,6 +884,10 @@ export default function HomeScreen() {
 }
 
 /* ── Styles — strict monochrome, no borders / shadows / rounded corners ─── */
+// (style additions for the Bypass Limit modal live in the same StyleSheet
+// block below, keyed `bypassNextLabel` — the small DIM-coloured "next free
+// bypass in 4H 23M" line that sits between the countdown and the actions.)
+
 
 const styles = StyleSheet.create({
   root: {
@@ -800,5 +1072,18 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     letterSpacing: 3,
     marginTop: 4,
+  },
+  // Sub-label on the Bypass Limit modal: "NEXT FREE BYPASS IN 4H 23M".
+  // DIM colour (not FG) because it's informational, not actionable —
+  // the eye should land on the big countdown above and the action row
+  // below it. Centered alignment matches the countdown wrap above.
+  bypassNextLabel: {
+    color: DIM,
+    fontFamily: MONO,
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 1,
+    textAlign: "center",
+    marginTop: 16,
   },
 });

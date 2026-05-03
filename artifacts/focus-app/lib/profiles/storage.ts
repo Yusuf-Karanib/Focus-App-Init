@@ -54,9 +54,48 @@ export async function loadProfiles(): Promise<FocusProfile[]> {
  *
  * Caller is responsible for awaiting (or fire-and-forgetting); we don't
  * swallow errors here so they're visible if the device is out of storage.
+ *
+ * Side effect: fires `subscribeToProfilesChanges` listeners after a
+ * successful write so any other live `useFocusProfiles` instance can
+ * reload from storage. This is what keeps the launcher screen in sync
+ * with edits made on the profiles screen, and is what makes the native
+ * blocklist push (which depends on `useFocusProfiles`'s output) reflect
+ * fresh data without needing a context refactor.
  */
 export async function saveProfiles(profiles: FocusProfile[]): Promise<void> {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(profiles));
+  notifyProfilesChanged();
+}
+
+/* ── Cross-instance event bus ──────────────────────────────────────────── */
+
+/**
+ * Both the launcher (`app/(tabs)/index.tsx`) and the profiles screen
+ * (`app/profiles.tsx`) call `useFocusProfiles` independently. Each
+ * instance owns its own React state, so without this bus a save from
+ * one screen would leave the other reading stale data — including the
+ * native-sync effect on the launcher, which would then push the wrong
+ * blocklist to the AccessibilityService.
+ *
+ * Self-notifications (the instance that called save also gets pinged)
+ * are intentionally NOT filtered. The resulting reload is idempotent
+ * (same data, same shape) and the extra render is cheap; the cost of
+ * trying to filter would be tracking instance identity, which buys us
+ * nothing measurable.
+ */
+const listeners = new Set<() => void>();
+
+export function subscribeToProfilesChanges(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => {
+    listeners.delete(cb);
+  };
+}
+
+function notifyProfilesChanged(): void {
+  for (const cb of listeners) {
+    cb();
+  }
 }
 
 /**

@@ -4,7 +4,11 @@ import { AppState } from "react-native";
 import { FocusModule } from "../../modules/focus-module";
 
 import { computeActivePackages } from "./schedule";
-import { loadProfiles, saveProfiles } from "./storage";
+import {
+  loadProfiles,
+  saveProfiles,
+  subscribeToProfilesChanges,
+} from "./storage";
 import type { FocusProfile } from "./types";
 
 /* ── Public surface ────────────────────────────────────────────────────── */
@@ -35,7 +39,7 @@ export interface UseFocusProfilesResult {
 /* ── Hook ──────────────────────────────────────────────────────────────── */
 
 /**
- * Single source of truth for Focus Profiles in the React tree.
+ * Source of truth for Focus Profiles in the React tree.
  *
  * Responsibilities:
  *   1. Load profiles from AsyncStorage on mount (one-shot).
@@ -43,16 +47,17 @@ export interface UseFocusProfilesResult {
  *      transition automatically without a UI poke.
  *   3. Re-evaluate when the app returns to foreground (the JS engine may
  *      have been frozen for hours; the local clock has moved on).
- *   4. Push the active set to the native AccessibilityService whenever
- *      it actually changes — debounced by string-key comparison so we
- *      don't write to SharedPreferences every minute when nothing changed.
+ *   4. Reload from AsyncStorage when ANY mounted instance saves changes,
+ *      via the storage-level event bus. This is what keeps the launcher
+ *      and the profiles screen in lockstep without a context provider.
  *
- * Intentional non-goals:
- *   - This hook does NOT enforce singleton-ness across multiple consumers.
- *     If two screens both call `useFocusProfiles()`, both will load and
- *     both will tick — wasteful but correct (the AsyncStorage reads are
- *     idempotent and the sync-to-native is debounced). When more than one
- *     consumer is needed, lift the hook into a context provider.
+ * Explicit non-responsibility:
+ *   - Pushing the active set to the native AccessibilityService is NOT
+ *     done here. With Emergency Bypass in the picture, the EFFECTIVE
+ *     blocked set is `profilesActive - bypassedPackages` and only the
+ *     screen that knows about both can compute it correctly. Use
+ *     `useBlocklistSync(packages, loaded)` from a single owning screen
+ *     (the launcher) to push.
  */
 export function useFocusProfiles(): UseFocusProfilesResult {
   const [profiles, setProfilesState] = useState<FocusProfile[]>([]);
@@ -114,6 +119,20 @@ export function useFocusProfiles(): UseFocusProfilesResult {
     return () => sub.remove();
   }, []);
 
+  // ── Cross-instance bus ────────────────────────────────────────────────
+  // When the profiles screen saves an edit, our state would otherwise
+  // stay stale until the next foreground transition. Reload directly.
+  useEffect(() => {
+    return subscribeToProfilesChanges(() => {
+      loadProfiles().then(
+        (p) => setProfilesState(p),
+        () => {
+          /* swallow */
+        }
+      );
+    });
+  }, []);
+
   // ── Derive active set ─────────────────────────────────────────────────
   const activePackages = useMemo(() => {
     return computeActivePackages(profiles, new Date());
@@ -127,26 +146,6 @@ export function useFocusProfiles(): UseFocusProfilesResult {
     () => new Set(activePackages),
     [activePackages]
   );
-
-  // ── Sync to native ────────────────────────────────────────────────────
-  // Push the active set to FocusModule.setBlockedApps whenever it
-  // actually changes. Comparing the joined string against the last-pushed
-  // value avoids a SharedPreferences write every minute when the schedule
-  // hasn't transitioned. Joining with NUL is safe — package names can't
-  // contain it.
-  const lastPushedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!loaded) return; // Don't wipe the native blocklist before initial load
-    const key = activePackages.join("\x00");
-    if (key === lastPushedRef.current) return;
-    lastPushedRef.current = key;
-    try {
-      FocusModule.setBlockedApps(activePackages);
-    } catch {
-      // No-op stub on web/iOS/Expo Go. Native errors here are unrecoverable
-      // anyway — the user will simply see stale blocking, which fails safe.
-    }
-  }, [activePackages, loaded]);
 
   // ── Mutator ───────────────────────────────────────────────────────────
   const setProfiles = useCallback(async (next: FocusProfile[]) => {
@@ -166,4 +165,42 @@ export function useFocusProfiles(): UseFocusProfilesResult {
     activeBlockedSet,
     setProfiles,
   };
+}
+
+/* ── Native blocklist sync ─────────────────────────────────────────────── */
+
+/**
+ * Push a sorted package-name array to the native AccessibilityService
+ * whenever it actually changes.
+ *
+ * This used to live inside `useFocusProfiles`. It was extracted because
+ * the EFFECTIVE blocked set isn't just "what profiles say is blocked" —
+ * it's "what profiles say MINUS what bypass currently grants". Only the
+ * screen that knows about both can compute that, so the sync moved to
+ * the call site. Mount this hook from EXACTLY ONE screen (the launcher)
+ * — multiple callers would race to push different snapshots.
+ *
+ * The dedup uses a NUL-joined key because package names cannot contain
+ * NUL bytes; this lets us treat the comparison as a simple string equality
+ * check rather than walking arrays element-by-element.
+ *
+ * `loaded` gates the first push: we don't want to wipe the native
+ * blocklist with `[]` between mount and the first AsyncStorage resolve,
+ * because that would briefly unblock everything on every cold start.
+ */
+export function useBlocklistSync(packages: string[], loaded: boolean): void {
+  const lastPushedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!loaded) return;
+    const key = packages.join("\x00");
+    if (key === lastPushedRef.current) return;
+    lastPushedRef.current = key;
+    try {
+      FocusModule.setBlockedApps(packages);
+    } catch {
+      // No-op stub on web / iOS / Expo Go. Native errors here are
+      // unrecoverable anyway — the user just sees stale blocking, which
+      // fails safe (apps stay blocked rather than silently unblocking).
+    }
+  }, [packages, loaded]);
 }
