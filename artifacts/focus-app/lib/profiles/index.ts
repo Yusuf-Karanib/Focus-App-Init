@@ -21,5 +21,6 @@ export {
 } from "./schedule";
 export {
   useFocusProfiles,
+  useBlocklistSync,
   type UseFocusProfilesResult,
 } from "./useFocusProfiles";
