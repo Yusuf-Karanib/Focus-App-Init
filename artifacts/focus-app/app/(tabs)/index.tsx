@@ -17,7 +17,6 @@ import * as Haptics from "expo-haptics";
 import {
   FocusModule,
   InstalledApp,
-  isFocusModuleAvailable,
 } from "../../modules/focus-module";
 
 const BG = "#000000";
@@ -68,7 +67,6 @@ export default function HomeScreen() {
   // for managing this set; for now it lives only in component state.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [hiddenApps, setHiddenApps] = useState<Set<string>>(() => new Set());
-  const [loading, setLoading] = useState<boolean>(true);
   const [warning, setWarning] = useState<string | null>(null);
 
   // ── Focus Mode state ─────────────────────────────────────────────────────
@@ -105,7 +103,6 @@ export default function HomeScreen() {
     }
     setApps(installed);
     setBlockedSet(new Set(blocked));
-    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -310,17 +307,9 @@ export default function HomeScreen() {
     </View>
   );
 
-  const Empty = (
-    <View style={{ paddingHorizontal: 20 }}>
-      <Text style={styles.bodyMuted}>
-        {loading
-          ? "LOADING APPS…"
-          : isFocusModuleAvailable
-            ? "NO LAUNCHABLE APPS FOUND."
-            : "NO APPS AVAILABLE — RUN ON AN ANDROID DEVICE."}
-      </Text>
-    </View>
-  );
+  // No ListEmptyComponent — when the list is empty (initial load, or
+  // genuinely no launchable apps on the device) we render the header alone
+  // and nothing below it. Brutalist: the absence IS the message.
 
   return (
     <View style={[styles.root, { paddingTop: topPad + 24 }]}>
@@ -329,7 +318,6 @@ export default function HomeScreen() {
         renderItem={renderItem}
         keyExtractor={keyExtractor}
         ListHeaderComponent={Header}
-        ListEmptyComponent={Empty}
         contentContainerStyle={{
           paddingBottom: insets.bottom + (Platform.OS === "web" ? 34 : 24),
         }}
@@ -527,13 +515,6 @@ const styles = StyleSheet.create({
   // Pressed feedback — uniform across both blocked and launchable rows.
   rowPressed: {
     color: "#888888",
-  },
-
-  bodyMuted: {
-    color: "#888888",
-    fontFamily: MONO,
-    fontSize: 14,
-    letterSpacing: 1,
   },
 
   // ── Friction modal ─────────────────────────────────────────────────────
