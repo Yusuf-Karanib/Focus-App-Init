@@ -32,6 +32,14 @@ const MONO = Platform.select({
 // How long the "BLOCKED" warning stays visible after tapping a blocked app.
 const WARNING_VISIBLE_MS = 2_500;
 
+// ── Mindful Delay ──────────────────────────────────────────────────────────
+// How many seconds the breathing-room overlay forces the user to wait before
+// the CONTINUE button appears, when they tap a blocked app from the launcher.
+// Long enough to interrupt autopilot scrolling muscle memory, short enough
+// to feel like deliberate friction rather than punishment. Adjust here if the
+// number ever needs tuning — single source of truth.
+const MINDFUL_DELAY_SECONDS = 15;
+
 // ── Friction phrases ────────────────────────────────────────────────────────
 // Pool of phrases the user must type verbatim to disable Focus Mode. Picked
 // at random every time the friction modal opens so muscle memory doesn't form
@@ -83,6 +91,20 @@ export default function HomeScreen() {
   const [frictionPhrase, setFrictionPhrase] = useState<string>("");
   const [frictionInput, setFrictionInput] = useState<string>("");
 
+  // ── Mindful Delay state ─────────────────────────────────────────────────
+  // The blocked app the user has chosen to attempt to open. `null` means the
+  // overlay is closed; any non-null value opens the modal. Using the app
+  // object itself (not just a flag) lets the modal display the app name and
+  // launch it on confirm without needing a second piece of state to track
+  // *which* app to launch. Seconds-left ticks from MINDFUL_DELAY_SECONDS
+  // down to 0; the CONTINUE button is hidden until it reaches 0.
+  const [mindfulDelayApp, setMindfulDelayApp] = useState<InstalledApp | null>(
+    null
+  );
+  const [mindfulSecondsLeft, setMindfulSecondsLeft] = useState<number>(
+    MINDFUL_DELAY_SECONDS
+  );
+
   // Keep a ref to the warning timer so we can cancel it if a new warning
   // arrives before the previous one has cleared.
   const warningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -126,6 +148,23 @@ export default function HomeScreen() {
     };
   }, []);
 
+  // ── Mindful Delay countdown ────────────────────────────────────────────
+  // When the overlay opens (mindfulDelayApp transitions null → non-null),
+  // reset the counter and start a 1-second interval that decrements it.
+  // Clamps at 0 so the interval keeps ticking harmlessly even after the
+  // CONTINUE button becomes available — simpler than racing to clear it.
+  // The cleanup function clears the interval on close, on unmount, or
+  // whenever the modal target switches (which shouldn't happen in practice
+  // but is correct by construction).
+  useEffect(() => {
+    if (!mindfulDelayApp) return;
+    setMindfulSecondsLeft(MINDFUL_DELAY_SECONDS);
+    const id = setInterval(() => {
+      setMindfulSecondsLeft((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [mindfulDelayApp]);
+
   // ── Visible list (filter hidden, then sort alphabetically) ─────────────
   // Order matters: filter first so we don't waste cycles sorting entries
   // we're about to drop. Native side already sorts by lowercased name, but
@@ -147,10 +186,15 @@ export default function HomeScreen() {
   const handleTap = useCallback(
     (app: InstalledApp) => {
       if (blockedSet.has(app.packageName)) {
+        // Blocked tap → open the Mindful Delay overlay instead of launching.
+        // The overlay decides (after the 15-second breath) whether the app
+        // actually opens. We do NOT call showWarning here — the overlay IS
+        // the user-facing feedback, a transient banner on top would just
+        // add noise.
         if (Platform.OS !== "web") {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         }
-        showWarning(`BLOCKED: ${app.name.toUpperCase()}`);
+        setMindfulDelayApp(app);
         return;
       }
 
@@ -232,6 +276,42 @@ export default function HomeScreen() {
     setFrictionOpen(false);
     setFrictionInput("");
   }, []);
+
+  // ── Mindful Delay handlers ─────────────────────────────────────────────
+  // STAY FOCUSED — the path of least resistance and the one we want to
+  // reward, so we use a Success haptic. Closing the overlay without
+  // launching the app is the win condition for FocusApp.
+  const cancelMindfulDelay = useCallback(() => {
+    if (Platform.OS !== "web") {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    setMindfulDelayApp(null);
+  }, []);
+
+  // CONTINUE — only valid once the countdown has hit zero. We snapshot the
+  // target app into a local var BEFORE clearing it, because closing the
+  // modal triggers the cleanup useEffect which can race with the launchApp
+  // call if we read from state. Light haptic (not Warning) — the user has
+  // earned this; no shaming.
+  const confirmMindfulDelay = useCallback(() => {
+    if (mindfulSecondsLeft > 0) return;
+    const target = mindfulDelayApp;
+    setMindfulDelayApp(null);
+    if (!target) return;
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    const ok = (() => {
+      try {
+        return FocusModule.launchApp(target.packageName);
+      } catch {
+        return false;
+      }
+    })();
+    if (!ok) {
+      showWarning(`COULDN'T LAUNCH: ${target.name.toUpperCase()}`);
+    }
+  }, [mindfulDelayApp, mindfulSecondsLeft]);
 
   // ── Row renderer ───────────────────────────────────────────────────────
   const renderItem = useCallback(
@@ -411,6 +491,88 @@ export default function HomeScreen() {
         </View>
       </Modal>
 
+      {/* ── Mindful Delay overlay ───────────────────────────────────────
+          Opened when the user taps a blocked app from the launcher list.
+          A 15-second countdown gates the CONTINUE button; STAY FOCUSED is
+          available throughout. This is the launcher-side analog of the
+          native NudgeActivity (which catches blocked apps opened from
+          outside FocusApp — notifications, recents, etc.).
+      */}
+      <Modal
+        visible={mindfulDelayApp !== null}
+        transparent={false}
+        animationType="none"
+        onRequestClose={cancelMindfulDelay}
+        statusBarTranslucent
+      >
+        <View style={styles.modalRoot}>
+          <View style={[styles.modalInner, { paddingTop: topPad + 24 }]}>
+            <Text style={styles.appName}>FOCUSAPP</Text>
+            <View style={styles.divider} />
+
+            <Text style={styles.modalWarnBar}>
+              {`  ! ${(mindfulDelayApp?.name ?? "").toUpperCase()} IS BLOCKED  `}
+            </Text>
+
+            <Text style={styles.modalBody}>
+              TAKE A DEEP BREATH.{"\n"}
+              DO YOU REALLY NEED TO OPEN THIS RIGHT NOW?
+            </Text>
+
+            {/* Countdown — pad to 2 digits so the layout doesn't jump as
+                the value drops from 10 to 9. Centered visually, big enough
+                that it's the focal point of the screen. */}
+            <View style={styles.mindfulCountdownWrap}>
+              <Text style={styles.mindfulCountdown}>
+                {String(mindfulSecondsLeft).padStart(2, "0")}
+              </Text>
+              <Text style={styles.mindfulCountdownLabel}>SECONDS</Text>
+            </View>
+
+            <View style={styles.modalSpacer} />
+
+            <Pressable
+              onPress={cancelMindfulDelay}
+              accessibilityRole="button"
+              accessibilityLabel="Stay focused and go back"
+            >
+              {({ pressed }) => (
+                <Text
+                  style={[
+                    styles.modalAction,
+                    pressed && styles.modalActionPressed,
+                  ]}
+                >
+                  [ STAY FOCUSED — GO BACK ]
+                </Text>
+              )}
+            </Pressable>
+
+            {/* CONTINUE is fully hidden (not disabled) until the timer
+                hits 0. The user shouldn't see a non-functional button
+                during the breath — that would invite anxious tapping. */}
+            {mindfulSecondsLeft === 0 && (
+              <Pressable
+                onPress={confirmMindfulDelay}
+                accessibilityRole="button"
+                accessibilityLabel={`Continue to ${mindfulDelayApp?.name ?? ""}`}
+              >
+                {({ pressed }) => (
+                  <Text
+                    style={[
+                      styles.modalAction,
+                      pressed && styles.modalActionPressed,
+                    ]}
+                  >
+                    {`[ CONTINUE TO ${(mindfulDelayApp?.name ?? "").toUpperCase()} ]`}
+                  </Text>
+                )}
+              </Pressable>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       {/*
         TODO (next step): wire `focusModeEnabled` to the native module so
         that when OFF the AccessibilityService stops launching NudgeActivity
@@ -585,5 +747,31 @@ const styles = StyleSheet.create({
   },
   modalActionDisabled: {
     color: DIM,
+  },
+
+  // ── Mindful Delay countdown ────────────────────────────────────────────
+  // Big, centered, monospace. The wrap centers the number + label as a
+  // unit on the cross axis; the inner Texts use the same font family as
+  // the rest of the brutalist UI but at much larger sizes.
+  mindfulCountdownWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginVertical: 24,
+  },
+  mindfulCountdown: {
+    color: FG,
+    fontFamily: MONO,
+    fontSize: 96,
+    fontWeight: "900",
+    letterSpacing: 4,
+    lineHeight: 104,
+  },
+  mindfulCountdownLabel: {
+    color: DIM,
+    fontFamily: MONO,
+    fontSize: 13,
+    fontWeight: "900",
+    letterSpacing: 3,
+    marginTop: 4,
   },
 });
