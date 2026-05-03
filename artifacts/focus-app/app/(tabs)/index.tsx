@@ -13,11 +13,13 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
+import { useRouter } from "expo-router";
 
 import {
   FocusModule,
   InstalledApp,
 } from "../../modules/focus-module";
+import { useFocusProfiles } from "../../lib/profiles";
 
 const BG = "#000000";
 const FG = "#ffffff";
@@ -66,8 +68,16 @@ function pickFrictionPhrase(): string {
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
 
+  const router = useRouter();
+
+  // Source of truth for the blocked set is now Focus Profiles. The hook
+  // loads profiles from AsyncStorage, evaluates which schedules are active
+  // RIGHT NOW, and pushes the resulting union to the native AccessibilityService
+  // (via FocusModule.setBlockedApps). The launcher just consumes the
+  // already-computed set for row-dimming and the Mindful Delay gate.
+  const { activeBlockedSet: blockedSet } = useFocusProfiles();
+
   const [apps, setApps] = useState<InstalledApp[]>([]);
-  const [blockedSet, setBlockedSet] = useState<Set<string>>(new Set());
   // Hidden apps are stronger than blocked apps: blocked apps still appear
   // in the launcher list (dimmed) and surface a warning when tapped, but
   // hidden apps are filtered out entirely before render — they don't exist
@@ -110,21 +120,18 @@ export default function HomeScreen() {
   const warningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Data load ──────────────────────────────────────────────────────────
+  // We only load installed apps here. The blocked set comes from
+  // useFocusProfiles() above — which also handles re-evaluating it on
+  // schedule transitions and on app foregrounding, so this screen no
+  // longer needs to manage that lifecycle.
   const loadAll = useCallback(() => {
     let installed: InstalledApp[] = [];
-    let blocked: string[] = [];
     try {
       installed = FocusModule.getInstalledApps();
     } catch {
       installed = [];
     }
-    try {
-      blocked = FocusModule.getBlockedApps();
-    } catch {
-      blocked = [];
-    }
     setApps(installed);
-    setBlockedSet(new Set(blocked));
   }, []);
 
   useEffect(() => {
@@ -380,6 +387,26 @@ export default function HomeScreen() {
         >
           {focusModeEnabled ? "[ ON ]" : "[ OFF ]"}
         </Text>
+      </Pressable>
+      <View style={styles.divider} />
+
+      {/* Entry point to the Focus Profiles management screen. Kept as a
+          plain text link rather than a button so the brutalist visual
+          rhythm of the header isn't broken — same shape as [ ON ] / [ OFF ]
+          on the row above. */}
+      <Pressable
+        onPress={() => {
+          if (Platform.OS !== "web") {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          }
+          router.push("/profiles");
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Manage focus profiles"
+        style={styles.toggleRow}
+      >
+        <Text style={styles.toggleLabel}>PROFILES</Text>
+        <Text style={styles.toggleStateOn}>[ MANAGE → ]</Text>
       </Pressable>
       <View style={styles.divider} />
 
