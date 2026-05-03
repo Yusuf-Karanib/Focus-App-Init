@@ -52,7 +52,11 @@ let nativeModule: FocusModuleType;
 
 try {
   if (Platform.OS === "android") {
-    nativeModule = requireNativeModule<FocusModuleType>("FocusModule");
+    // The string here MUST match the `Name(...)` declared in the Kotlin
+    // module (FocusModule.kt). They are looked up by string at runtime;
+    // the compiler cannot catch a drift. Mismatch silently falls back to
+    // the no-op stub, so every function appears to work but does nothing.
+    nativeModule = requireNativeModule<FocusModuleType>("FocusApp");
   } else {
     nativeModule = noop;
   }
