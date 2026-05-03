@@ -41,6 +41,9 @@ export interface FocusModuleType {
   hasUsageStatsPermission(): boolean;
   openUsageStatsSettings(): boolean;
   getAppUsageStats(): AppUsageStats;
+  hasGrayscalePermission(): boolean;
+  isGrayscaleEnabled(): boolean;
+  toggleGrayscale(enabled: boolean): boolean;
 }
 
 /**
@@ -84,6 +87,9 @@ const noop: FocusModuleType = {
     return false;
   },
   getAppUsageStats: () => ({}),
+  hasGrayscalePermission: () => false,
+  isGrayscaleEnabled: () => false,
+  toggleGrayscale: () => false,
 };
 
 /**
@@ -302,4 +308,73 @@ export function openUsageStatsSettings(): boolean {
  */
 export function getAppUsageStats(): AppUsageStats {
   return FocusApp.getAppUsageStats();
+}
+
+/**
+ * True iff this app currently holds `WRITE_SECURE_SETTINGS` — i.e.
+ * `toggleGrayscale(...)` will actually take effect rather than silently
+ * fail with a SecurityException.
+ *
+ * `WRITE_SECURE_SETTINGS` is a `signature|privileged` permission and
+ * CANNOT be granted by a runtime dialog or any in-app flow. The user
+ * must run a one-time ADB command from a desktop:
+ *
+ * ```
+ * adb shell pm grant com.anonymous.focusapp \
+ *   android.permission.WRITE_SECURE_SETTINGS
+ * ```
+ *
+ * After that grant, the permission persists across reboots and app
+ * updates (lost only on uninstall). UIs should call this first and
+ * show the ADB instructions when it returns `false`, instead of
+ * showing a toggle that appears to do nothing.
+ *
+ * On web, iOS, and inside Expo Go this returns `false`.
+ */
+export function hasGrayscalePermission(): boolean {
+  return FocusApp.hasGrayscalePermission();
+}
+
+/**
+ * Read the current device-wide grayscale state directly from
+ * `Settings.Secure`. Reading does NOT require `WRITE_SECURE_SETTINGS`;
+ * only writing does. Returns `false` if the underlying setting key is
+ * not present (treated as "not enabled").
+ *
+ * Useful for initializing a toggle's UI state on screen mount, and for
+ * verifying that a `toggleGrayscale(...)` call actually took effect.
+ *
+ * On web, iOS, and inside Expo Go this returns `false`.
+ */
+export function isGrayscaleEnabled(): boolean {
+  return FocusApp.isGrayscaleEnabled();
+}
+
+/**
+ * Turn the entire device display monochrome (`enabled = true`) or
+ * restore normal color (`enabled = false`). Implemented by writing the
+ * accessibility daltonizer keys under `Settings.Secure` — the same
+ * mechanism Digital Wellbeing's Bedtime Mode uses.
+ *
+ * Returns `true` if the write succeeded; `false` on any failure
+ * (overwhelmingly: the app does not hold `WRITE_SECURE_SETTINGS` —
+ * see `hasGrayscalePermission()` for the gating check and the ADB
+ * grant command). Never throws.
+ *
+ * On web, iOS, and inside Expo Go this is a no-op that returns `false`.
+ *
+ * Typical usage:
+ * ```ts
+ * if (!hasGrayscalePermission()) {
+ *   // Show "run this ADB command" instructions instead of the toggle
+ *   return;
+ * }
+ * const ok = toggleGrayscale(true);
+ * if (!ok) {
+ *   // Permission was revoked between the check and the call (rare)
+ * }
+ * ```
+ */
+export function toggleGrayscale(enabled: boolean): boolean {
+  return FocusApp.toggleGrayscale(enabled);
 }
