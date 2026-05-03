@@ -15,6 +15,13 @@ export interface InstalledApp {
   packageName: string;
 }
 
+/**
+ * Native-module surface. Mirrors the `Function(...)` declarations in
+ * `FocusModule.kt` (Kotlin side, registered as `Name("FocusApp")`).
+ *
+ * If you add or change a function here, you must change it in the Kotlin
+ * file too — there is no compile-time link between the two sides.
+ */
 export interface FocusModuleType {
   setBlockedApps(packages: string[]): number;
   getBlockedApps(): string[];
@@ -25,6 +32,16 @@ export interface FocusModuleType {
   promptDefaultLauncher(): boolean;
 }
 
+/**
+ * Safe stub used on platforms where the native module isn't available
+ * (web, iOS, and inside Expo Go on any platform). Every method is a no-op
+ * with a sensible default return value, so screens that import this
+ * module never crash on import — they simply see "no installed apps,
+ * service not enabled, nothing blocked".
+ *
+ * Keeping the stub structurally identical to the native module is what
+ * lets us guarantee `FocusModuleType` is honored on every platform.
+ */
 const noop: FocusModuleType = {
   setBlockedApps: () => 0,
   getBlockedApps: () => [],
@@ -48,17 +65,32 @@ const noop: FocusModuleType = {
   },
 };
 
-let nativeModule: FocusModuleType;
-
+/**
+ * Resolve the native module exactly once at import time.
+ *
+ * The string `"FocusApp"` MUST match the `Name(...)` declared in
+ * `FocusModule.kt`. They are looked up by string at runtime; the compiler
+ * cannot catch a drift. Mismatch silently falls back to the no-op stub,
+ * meaning every native call appears to "work" but does nothing.
+ *
+ * Resolution rules:
+ *   1. Non-Android (iOS / web)             → use the no-op stub.
+ *   2. Android, but `requireNativeModule` throws (running in Expo Go,
+ *      or in a dev client built before the module existed) → no-op stub
+ *      with a one-time dev warning.
+ *   3. Android with the native module present → real bridge.
+ *
+ * The result is bound to `FocusApp` here. We re-export it under both
+ * names — `FocusApp` (the new preferred name, matching the Kotlin
+ * `Name(...)`) and `FocusModule` (kept for backward compatibility with
+ * the existing import in `app/(tabs)/index.tsx`).
+ */
+let resolved: FocusModuleType;
 try {
   if (Platform.OS === "android") {
-    // The string here MUST match the `Name(...)` declared in the Kotlin
-    // module (FocusModule.kt). They are looked up by string at runtime;
-    // the compiler cannot catch a drift. Mismatch silently falls back to
-    // the no-op stub, so every function appears to work but does nothing.
-    nativeModule = requireNativeModule<FocusModuleType>("FocusApp");
+    resolved = requireNativeModule<FocusModuleType>("FocusApp");
   } else {
-    nativeModule = noop;
+    resolved = noop;
   }
 } catch (err) {
   if (__DEV__) {
@@ -67,39 +99,72 @@ try {
         "This is expected in Expo Go and on web; build a custom dev client to use it."
     );
   }
-  nativeModule = noop;
+  resolved = noop;
 }
 
-export const FocusModule = nativeModule;
-export default FocusModule;
+/**
+ * Direct handle to the native bridge. Exported so callers that prefer
+ * `FocusApp.getInstalledApps()` (matching the Kotlin `Name(...)`) can use
+ * that style instead of the individual function exports below.
+ */
+export const FocusApp: FocusModuleType = resolved;
 
+/**
+ * Backward-compatible alias for `FocusApp`. Existing screens import this
+ * name; keeping it avoids a churning rename across the rest of the app.
+ */
+export const FocusModule: FocusModuleType = resolved;
+
+export default FocusApp;
+
+/**
+ * `true` only when we're on Android AND the native module successfully
+ * resolved (i.e. not the no-op stub). Use this to gate UI that only makes
+ * sense when real device data is available, e.g. an empty-state message
+ * vs. a "build a dev client" hint.
+ */
 export const isFocusModuleAvailable: boolean =
-  Platform.OS === "android" && nativeModule !== noop;
+  Platform.OS === "android" && resolved !== noop;
+
+/* ─────────────────────────────────────────────────────────────────────── */
+/*  Convenience function exports — thin wrappers around `FocusApp.*`     */
+/*                                                                        */
+/*  Each wrapper exists so callers can do                                 */
+/*      import { getInstalledApps } from "@/modules/focus-module"        */
+/*  rather than                                                           */
+/*      import { FocusApp } from "@/modules/focus-module"                */
+/*      FocusApp.getInstalledApps()                                       */
+/*                                                                        */
+/*  Both styles work; the wrappers are also where the user-facing         */
+/*  JSDoc lives.                                                          */
+/* ─────────────────────────────────────────────────────────────────────── */
 
 /**
  * Save the list of blocked Android package names to native SharedPreferences.
  * The FocusAccessibilityService reads this list and forces the user back to
- * the home screen whenever a matching app comes to the foreground.
+ * the home screen whenever a matching app comes to the foreground; the
+ * FocusNotificationListener reads the same list and silently cancels any
+ * notifications posted from those packages.
  *
  * On web and inside Expo Go this is a safe no-op that returns 0.
  *
- * @param apps Array of package names, e.g. ["com.instagram.android"]
+ * @param apps Array of package names, e.g. `["com.instagram.android"]`.
  * @returns The number of packages that were saved.
  */
 export function setBlockedApps(apps: string[]): number {
-  return nativeModule.setBlockedApps(apps);
+  return FocusApp.setBlockedApps(apps);
 }
 
 export function getBlockedApps(): string[] {
-  return nativeModule.getBlockedApps();
+  return FocusApp.getBlockedApps();
 }
 
 export function isServiceEnabled(): boolean {
-  return nativeModule.isServiceEnabled();
+  return FocusApp.isServiceEnabled();
 }
 
 export function openAccessibilitySettings(): void {
-  nativeModule.openAccessibilitySettings();
+  FocusApp.openAccessibilitySettings();
 }
 
 /**
@@ -111,13 +176,18 @@ export function openAccessibilitySettings(): void {
  * `packageName` (e.g. "com.instagram.android"). Pass the `packageName`
  * value back into `setBlockedApps` to block that app.
  *
- * On web and inside Expo Go this is a safe no-op that returns an empty array.
+ * The returned array IS the array the native side produced — Expo's
+ * Kotlin bridge converts the underlying `List<Map<String, String>>`
+ * directly into a JS array of objects with no extra serialization step.
+ * Sorted alphabetically (case-insensitive) by `name`.
+ *
+ * On web and inside Expo Go this is a safe no-op that returns `[]`.
  *
  * Note: requires the `QUERY_ALL_PACKAGES` permission, which is declared by
  * this module's Expo config plugin.
  */
 export function getInstalledApps(): InstalledApp[] {
-  return nativeModule.getInstalledApps();
+  return FocusApp.getInstalledApps();
 }
 
 /**
@@ -132,10 +202,10 @@ export function getInstalledApps(): InstalledApp[] {
  *
  * On web and inside Expo Go this is a safe no-op that returns `false`.
  *
- * @param packageName e.g. "com.android.chrome"
+ * @param packageName e.g. `"com.android.chrome"`.
  */
 export function launchApp(packageName: string): boolean {
-  return nativeModule.launchApp(packageName);
+  return FocusApp.launchApp(packageName);
 }
 
 /**
@@ -155,13 +225,7 @@ export function launchApp(packageName: string): boolean {
  *
  * On web and inside Expo Go this is a safe no-op that returns `false`
  * (and logs a warning in dev).
- *
- * Typical usage:
- * ```ts
- * const ok = promptDefaultLauncher();
- * if (!ok) Alert.alert("Open Settings → Apps → Default apps → Home app");
- * ```
  */
 export function promptDefaultLauncher(): boolean {
-  return nativeModule.promptDefaultLauncher();
+  return FocusApp.promptDefaultLauncher();
 }
