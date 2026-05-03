@@ -44,10 +44,16 @@ echo "Accepting Android SDK licenses..."
 yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
 echo "Installing required SDK components..."
+# android-36 / build-tools 36.0.0 are required because the Expo prebuild
+# template now sets compileSdk = targetSdk = 36. Older android-35 alone
+# fails the build with: "Failed to install the following SDK components:
+# platforms;android-36".
 sdkmanager \
   "platform-tools" \
   "platforms;android-35" \
-  "build-tools;35.0.0"
+  "build-tools;35.0.0" \
+  "platforms;android-36" \
+  "build-tools;36.0.0"
 
 echo "Android SDK ready at: $ANDROID_SDK_ROOT"
 
