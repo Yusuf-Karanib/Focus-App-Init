@@ -15,6 +15,7 @@ const HOME_CATEGORY = "android.intent.category.HOME";
 const DEFAULT_CATEGORY = "android.intent.category.DEFAULT";
 
 const QUERY_ALL_PACKAGES = "android.permission.QUERY_ALL_PACKAGES";
+const PACKAGE_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS";
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -180,12 +181,36 @@ function withQueryAllPackages(config) {
   });
 }
 
+/**
+ * Pass 4: Add PACKAGE_USAGE_STATS so we can read per-app foreground time
+ * for the daily-usage display on the home screen.
+ *
+ * NOTE: This is a `signature|privileged` permission. Declaring it does
+ * NOT actually grant access — the user must additionally toggle FocusApp
+ * on inside Settings → Apps → Special access → Usage access. AndroidStudio
+ * (and `aapt`) will emit a "ProtectedPermissions" lint warning here,
+ * which is expected and correct for non-system apps. The build still
+ * succeeds and the permission lands in the merged manifest, which is
+ * what the OS reads to populate the Usage-access settings list.
+ *
+ * Google Play Store: usage-tracking apps (digital wellbeing, parental
+ * controls, screen-time analytics, focus / productivity apps) are an
+ * accepted use case for this permission.
+ */
+function withPackageUsageStats(config) {
+  return withAndroidManifest(config, (mod) => {
+    ensurePermission(mod.modResults, PACKAGE_USAGE_STATS);
+    return mod;
+  });
+}
+
 /* ── Compose ──────────────────────────────────────────────────────────────── */
 
 function withFocusModule(config) {
   config = withFocusAccessibilityService(config);
   config = withHomeLauncher(config);
   config = withQueryAllPackages(config);
+  config = withPackageUsageStats(config);
   return config;
 }
 

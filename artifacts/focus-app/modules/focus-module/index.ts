@@ -22,6 +22,14 @@ export interface InstalledApp {
  * If you add or change a function here, you must change it in the Kotlin
  * file too — there is no compile-time link between the two sides.
  */
+/**
+ * Map of package name to whole minutes of foreground time today (since
+ * local-time midnight). Packages with zero minutes today are omitted.
+ *
+ * Example: `{ "com.instagram.android": 47, "com.android.chrome": 12 }`
+ */
+export type AppUsageStats = Record<string, number>;
+
 export interface FocusModuleType {
   setBlockedApps(packages: string[]): number;
   getBlockedApps(): string[];
@@ -30,6 +38,9 @@ export interface FocusModuleType {
   getInstalledApps(): InstalledApp[];
   launchApp(packageName: string): boolean;
   promptDefaultLauncher(): boolean;
+  hasUsageStatsPermission(): boolean;
+  openUsageStatsSettings(): boolean;
+  getAppUsageStats(): AppUsageStats;
 }
 
 /**
@@ -63,6 +74,16 @@ const noop: FocusModuleType = {
     }
     return false;
   },
+  hasUsageStatsPermission: () => false,
+  openUsageStatsSettings: () => {
+    if (__DEV__) {
+      console.warn(
+        "[FocusModule] openUsageStatsSettings() unavailable on this platform."
+      );
+    }
+    return false;
+  },
+  getAppUsageStats: () => ({}),
 };
 
 /**
@@ -228,4 +249,57 @@ export function launchApp(packageName: string): boolean {
  */
 export function promptDefaultLauncher(): boolean {
   return FocusApp.promptDefaultLauncher();
+}
+
+/**
+ * True iff the user has granted PACKAGE_USAGE_STATS via
+ * Settings → Apps → Special access → Usage access. This permission is
+ * `signature|privileged` and cannot be granted by a runtime dialog —
+ * the user must enable it manually, exactly like the accessibility
+ * service. Use this to gate UI that asks for usage access vs. UI that
+ * shows the actual stats.
+ *
+ * On web, iOS, and inside Expo Go this returns `false`.
+ */
+export function hasUsageStatsPermission(): boolean {
+  return FocusApp.hasUsageStatsPermission();
+}
+
+/**
+ * Open the system "Usage access" settings screen so the user can grant
+ * FocusApp access to per-app usage data. Returns `true` if the screen
+ * opened, `false` on the rare devices that don't expose it (Android-Go,
+ * some kiosk ROMs). Never throws — callers can fall back on the boolean.
+ *
+ * On web, iOS, and inside Expo Go this is a no-op that returns `false`.
+ */
+export function openUsageStatsSettings(): boolean {
+  return FocusApp.openUsageStatsSettings();
+}
+
+/**
+ * Total foreground time per app for the current calendar day, in whole
+ * minutes, keyed by package name. "Today" starts at local-time midnight.
+ *
+ * Returns `{}` (not an error) if the user has not granted
+ * PACKAGE_USAGE_STATS — the Android OS silently returns no data in that
+ * case rather than throwing. Check `hasUsageStatsPermission()` first if
+ * you want to distinguish "no permission" from "no usage today".
+ *
+ * Apps with zero foreground time today are omitted from the result.
+ *
+ * On web, iOS, and inside Expo Go this returns `{}`.
+ *
+ * Typical usage:
+ * ```ts
+ * if (!hasUsageStatsPermission()) {
+ *   openUsageStatsSettings();
+ *   return;
+ * }
+ * const stats = getAppUsageStats();
+ * const totalMinutes = Object.values(stats).reduce((a, b) => a + b, 0);
+ * ```
+ */
+export function getAppUsageStats(): AppUsageStats {
+  return FocusApp.getAppUsageStats();
 }
